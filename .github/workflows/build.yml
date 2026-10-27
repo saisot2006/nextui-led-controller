@@ -1,0 +1,23 @@
+name: build
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build in tg5040 toolchain
+        run: docker run --rm -v "$PWD":/workspace ghcr.io/loveretro/tg5040-toolchain make -C /workspace
+      - name: Package pak
+        run: |
+          D="dist/Tools/tg5040/LED Control.pak"
+          mkdir -p "$D"
+          cp build/ledbp launch.sh pak.json "$D/"
+          chmod +x "$D/ledbp" "$D/launch.sh"
+          cd dist && zip -r ../LED_Control.pak.zip Tools
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LED_Control.pak
+          path: LED_Control.pak.zip
