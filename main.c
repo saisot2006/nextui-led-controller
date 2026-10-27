@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <dirent.h>
 
 #define W 1024
 #define H 768
@@ -30,27 +31,27 @@ typedef struct {
 } zone_t;
 
 static zone_t Z[NZ] = {
-    {"FN1 key",       "f1",   0x44, 0x00, 0x44, 0x440044, 4, 1000, 100, 1, 100},
-    {"FN2 key",       "f2",   0x44, 0x00, 0x44, 0x440044, 4, 1000, 100, 1, 100},
-    {"Top bar",       "m",    0x44, 0x00, 0x44, 0x440044, 4, 1000, 100, 1, 100},
-    {"Joysticks",     "lr",   0x44, 0x00, 0x44, 0x440044, 4, 1000, 100, 1, 100},
-    {"Rear lights",   "rear", 0x44, 0x00, 0x44, 0x440044, 4, 1000, 100, 1, 100},
+    {"Phím FN1",       "f1",   0x44, 0x00, 0x44, 0x440044, 4, 1000, 100, 1, 100},
+    {"Phím FN2",       "f2",   0x44, 0x00, 0x44, 0x440044, 4, 1000, 100, 1, 100},
+    {"Thanh trên",       "m",    0x44, 0x00, 0x44, 0x440044, 4, 1000, 100, 1, 100},
+    {"Joystick",     "lr",   0x44, 0x00, 0x44, 0x440044, 4, 1000, 100, 1, 100},
+    {"Đèn vai sau",   "rear", 0x44, 0x00, 0x44, 0x440044, 4, 1000, 100, 1, 100},
 };
 static zone_t ORIG[NZ];
 
 static const int EFF[] = {1, 2, 3, 4, 5, 6, 7};
-static const char *EFFN[] = {"Linear", "Breathe", "Sniff", "Static", "Blink 1", "Blink 2", "Blink 3"};
+static const char *EFFN[] = {"Tuyến tính", "Thở", "Sniff", "Đứng yên", "Nháy 1", "Nháy 2", "Nháy 3"};
 #define NEFF 7
 
 typedef struct { const char *name; unsigned rgb; } preset_t;
 static const preset_t PRE[] = {
-    {"Red", 0xFF0000}, {"Orange", 0xFF6400}, {"Yellow", 0xFFC800}, {"Green", 0x00FF00},
-    {"Cyan", 0x00FFFF}, {"Blue", 0x0000FF}, {"Purple", 0x8000FF}, {"Pink", 0xFF3C8C},
-    {"White", 0xFFFFFF}, {"Warm white", 0xFFB46E}
+    {"Đỏ", 0xFF0000}, {"Cam", 0xFF6400}, {"Vàng", 0xFFC800}, {"Xanh lá", 0x00FF00},
+    {"Xanh ngọc", 0x00FFFF}, {"Xanh dương", 0x0000FF}, {"Tím", 0x8000FF}, {"Hồng", 0xFF3C8C},
+    {"Trắng", 0xFFFFFF}, {"Trắng ấm", 0xFFB46E}
 };
 #define NPRE 10
 
-static const char *ROWN[NROW] = {"Zone", "Color", "Red", "Green", "Blue", "Brightness", "Effect"};
+static const char *ROWN[NROW] = {"Vùng đèn", "Màu", "Đỏ", "Xanh lá", "Xanh dương", "Độ sáng", "Hiệu ứng"};
 
 /* ---------- LED sysfs ---------- */
 static void wr(const char *name, const char *val) {
@@ -141,9 +142,31 @@ static int save_settings(void) {
     return 0;
 }
 
-/* ---------- drawing ---------- */
 static SDL_Renderer *R;
 static TTF_Font *F_BIG, *F_MED, *F_SMALL;
+
+/* ---------- font ---------- */
+/* Tìm file kết thúc bằng DejaVuSans-Bold.ttf trong thư mục hiện tại (launch.sh đã cd vào thư mục pak). */
+static int find_bundled_font(char *out, size_t n) {
+    DIR *d = opendir(".");
+    if (!d) return 0;
+    struct dirent *e;
+    const char *suf = "DejaVuSans-Bold.ttf";
+    size_t sl = strlen(suf);
+    int ok = 0;
+    while ((e = readdir(d))) {
+        size_t l = strlen(e->d_name);
+        if (l >= sl && !strcmp(e->d_name + l - sl, suf)) { snprintf(out, n, "%s", e->d_name); ok = 1; break; }
+    }
+    closedir(d);
+    return ok;
+}
+static int open_fonts(const char *path) {
+    F_BIG = TTF_OpenFont(path, 42); F_MED = TTF_OpenFont(path, 30); F_SMALL = TTF_OpenFont(path, 21);
+    return F_BIG && F_MED && F_SMALL;
+}
+
+/* ---------- drawing ---------- */
 
 static void text(TTF_Font *f, const char *s, int x, int y, SDL_Color c, int align) {
     if (!s || !*s) return;
@@ -162,13 +185,13 @@ static void rect(int x, int y, int w, int h, SDL_Color c) {
     SDL_RenderFillRect(R, &r);
 }
 
-static int zi = 0, ri = 0;     /* zi: 0..4 = zone, 5 = ALL */
+static int zi = NSEL - 1, ri = 0;   /* zi: 0..4 = vùng, 5 = tất cả (mặc định) */
 static Uint32 msg_until = 0;
 static char msg[96] = "";
 
 static void set_msg(const char *s) { snprintf(msg, sizeof msg, "%s", s); msg_until = SDL_GetTicks() + 2000; }
 static zone_t *cur(void) { return &Z[zi == NSEL - 1 ? 0 : zi]; }
-static const char *zone_label(void) { return zi == NSEL - 1 ? "All zones" : Z[zi].name; }
+static const char *zone_label(void) { return zi == NSEL - 1 ? "Tất cả đèn" : Z[zi].name; }
 static int preset_of(const zone_t *z) {
     unsigned c = ((unsigned)z->r << 16) | ((unsigned)z->g << 8) | (unsigned)z->b;
     for (int i = 0; i < NPRE; i++) if (PRE[i].rgb == c) return i;
@@ -179,7 +202,7 @@ static void draw(void) {
     SDL_Color bg = {18, 18, 26, 255}, white = {235, 235, 240, 255}, grey = {140, 140, 155, 255};
     SDL_Color sel = {52, 58, 96, 255}, acc = {120, 170, 255, 255};
     rect(0, 0, W, H, bg);
-    text(F_BIG, "LED Control - Brick Pro", W / 2, 20, white, 1);
+    text(F_BIG, "Điều khiển LED - Brick Pro", W / 2, 20, white, 1);
 
     zone_t *z = cur();
     int y0 = 92, rh = 74;
@@ -189,7 +212,7 @@ static void draw(void) {
         text(F_MED, ROWN[i], 64, y + 14, i == ri ? white : grey, 0);
         char v[48] = "";
         if (i == 0) snprintf(v, sizeof v, "< %s >", zone_label());
-        else if (i == 1) { int p = preset_of(z); snprintf(v, sizeof v, "< %s >", p >= 0 ? PRE[p].name : "Custom"); }
+        else if (i == 1) { int p = preset_of(z); snprintf(v, sizeof v, "< %s >", p >= 0 ? PRE[p].name : "Tùy chỉnh"); }
         else if (i == 2) snprintf(v, sizeof v, "%d", z->r);
         else if (i == 3) snprintf(v, sizeof v, "%d", z->g);
         else if (i == 4) snprintf(v, sizeof v, "%d", z->b);
@@ -213,7 +236,7 @@ static void draw(void) {
     char hex[24];
     snprintf(hex, sizeof hex, "#%02X%02X%02X", z->r, z->g, z->b);
     text(F_MED, hex, 840, 450, white, 1);
-    text(F_SMALL, zi == NSEL - 1 ? "all zones" : z->file, 840, 492, grey, 1);
+    text(F_SMALL, zi == NSEL - 1 ? "tất cả đèn" : z->file, 840, 492, grey, 1);
 
     /* all-zone mini swatches */
     for (int i = 0; i < NZ; i++) {
@@ -224,7 +247,7 @@ static void draw(void) {
     }
 
     if (SDL_GetTicks() < msg_until) text(F_MED, msg, W / 2, 640, acc, 1);
-    text(F_SMALL, "D-pad: change   L1/R1: big step   A: next color   START: save   B: exit", W / 2, 722, grey, 1);
+    text(F_SMALL, "D-pad: đổi   L1/R1: nhảy lớn   A: màu kế   START: lưu   B: thoát", W / 2, 722, grey, 1);
     SDL_RenderPresent(R);
 }
 
@@ -275,8 +298,8 @@ static void next_preset(void) {
     commit();
 }
 static void do_save(void) {
-    if (save_settings() == 0) { memcpy(ORIG, Z, sizeof Z); set_msg("Saved to NextUI settings"); }
-    else set_msg("Save failed");
+    if (save_settings() == 0) { memcpy(ORIG, Z, sizeof Z); set_msg("Đã lưu vào cài đặt NextUI"); }
+    else set_msg("Lưu thất bại");
 }
 static void quit_restore(void) { for (int i = 0; i < NZ; i++) apply_zone(&ORIG[i]); }
 
@@ -295,9 +318,12 @@ int main(void) {
 
     const char *sd = getenv("SDCARD_PATH");
     char fp[300];
-    snprintf(fp, sizeof fp, "%s/.system/res/BPreplayBold-unhinted.otf", sd ? sd : "/mnt/SDCARD");
-    F_BIG = TTF_OpenFont(fp, 44); F_MED = TTF_OpenFont(fp, 32); F_SMALL = TTF_OpenFont(fp, 22);
-    if (!F_BIG || !F_MED || !F_SMALL) { fprintf(stderr, "font not found: %s\n", fp); return 1; }
+    int font_ok = 0;
+    if (find_bundled_font(fp, sizeof fp)) font_ok = open_fonts(fp);                 /* 1. font đi kèm pak (có đủ tiếng Việt) */
+    if (!font_ok) { snprintf(fp, sizeof fp, "%s/.system/res/font1.ttf", sd ? sd : "/mnt/SDCARD"); font_ok = open_fonts(fp); }
+    if (!font_ok) { snprintf(fp, sizeof fp, "%s/.system/res/BPreplayBold-unhinted.otf", sd ? sd : "/mnt/SDCARD"); font_ok = open_fonts(fp); }
+    if (!font_ok) { fprintf(stderr, "font not found: %s\n", fp); return 1; }
+    fprintf(stderr, "font: %s\n", fp);
 
     load_settings();
     memcpy(ORIG, Z, sizeof Z);
