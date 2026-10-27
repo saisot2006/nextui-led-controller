@@ -14,7 +14,7 @@ jobs:
         run: |
           D="dist/Tools/tg5040/LED Control.pak"
           mkdir -p "$D"
-          cp build/ledbp launch.sh pak.json "$D/"
+          cp build/ledbp launch.sh pak.json DejaVuSans-Bold.ttf LICENSE-DejaVu.txt "$D/"
           chmod +x "$D/ledbp" "$D/launch.sh"
           cd dist && zip -r ../LED_Control.pak.zip Tools
       - uses: actions/upload-artifact@v4
