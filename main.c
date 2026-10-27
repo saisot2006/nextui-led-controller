@@ -17,7 +17,8 @@
 #define W 1024
 #define H 768
 #define NZ 5
-#define NROW 6
+#define NROW 7
+#define NSEL 6   /* 5 vung + ALL */
 #define LED_DIR "/sys/class/led_anim/"
 
 typedef struct {
@@ -41,11 +42,15 @@ static const int EFF[] = {1, 2, 3, 4, 5, 6, 7};
 static const char *EFFN[] = {"Linear", "Breathe", "Sniff", "Static", "Blink 1", "Blink 2", "Blink 3"};
 #define NEFF 7
 
-static const unsigned PRESET[] = {0xFF0000, 0x00FF00, 0x0000FF, 0xFFFFFF, 0xFF00FF, 0x00FFFF, 0xFFFF00, 0xFF8000};
-#define NPRESET 8
-static int preset_idx = 0;
+typedef struct { const char *name; unsigned rgb; } preset_t;
+static const preset_t PRE[] = {
+    {"Red", 0xFF0000}, {"Orange", 0xFF6400}, {"Yellow", 0xFFC800}, {"Green", 0x00FF00},
+    {"Cyan", 0x00FFFF}, {"Blue", 0x0000FF}, {"Purple", 0x8000FF}, {"Pink", 0xFF3C8C},
+    {"White", 0xFFFFFF}, {"Warm white", 0xFFB46E}
+};
+#define NPRE 10
 
-static const char *ROWN[NROW] = {"Zone", "Red", "Green", "Blue", "Brightness", "Effect"};
+static const char *ROWN[NROW] = {"Zone", "Color", "Red", "Green", "Blue", "Brightness", "Effect"};
 
 /* ---------- LED sysfs ---------- */
 static void wr(const char *name, const char *val) {
@@ -157,38 +162,47 @@ static void rect(int x, int y, int w, int h, SDL_Color c) {
     SDL_RenderFillRect(R, &r);
 }
 
-static int zi = 0, ri = 0;
+static int zi = 0, ri = 0;     /* zi: 0..4 = zone, 5 = ALL */
 static Uint32 msg_until = 0;
 static char msg[96] = "";
 
 static void set_msg(const char *s) { snprintf(msg, sizeof msg, "%s", s); msg_until = SDL_GetTicks() + 2000; }
+static zone_t *cur(void) { return &Z[zi == NSEL - 1 ? 0 : zi]; }
+static const char *zone_label(void) { return zi == NSEL - 1 ? "All zones" : Z[zi].name; }
+static int preset_of(const zone_t *z) {
+    unsigned c = ((unsigned)z->r << 16) | ((unsigned)z->g << 8) | (unsigned)z->b;
+    for (int i = 0; i < NPRE; i++) if (PRE[i].rgb == c) return i;
+    return -1;
+}
 
 static void draw(void) {
     SDL_Color bg = {18, 18, 26, 255}, white = {235, 235, 240, 255}, grey = {140, 140, 155, 255};
     SDL_Color sel = {52, 58, 96, 255}, acc = {120, 170, 255, 255};
     rect(0, 0, W, H, bg);
-    text(F_BIG, "LED Control - Brick Pro", W / 2, 22, white, 1);
+    text(F_BIG, "LED Control - Brick Pro", W / 2, 20, white, 1);
 
-    zone_t *z = &Z[zi];
-    int y0 = 110, rh = 78;
+    zone_t *z = cur();
+    int y0 = 92, rh = 74;
     for (int i = 0; i < NROW; i++) {
         int y = y0 + i * rh;
         if (i == ri) rect(40, y, 600, rh - 10, sel);
-        text(F_MED, ROWN[i], 64, y + 16, i == ri ? white : grey, 0);
+        text(F_MED, ROWN[i], 64, y + 14, i == ri ? white : grey, 0);
         char v[48] = "";
-        if (i == 0) snprintf(v, sizeof v, "< %s >", z->name);
-        else if (i == 1) snprintf(v, sizeof v, "%d", z->r);
-        else if (i == 2) snprintf(v, sizeof v, "%d", z->g);
-        else if (i == 3) snprintf(v, sizeof v, "%d", z->b);
-        else if (i == 4) snprintf(v, sizeof v, "%d%%", z->bright);
+        if (i == 0) snprintf(v, sizeof v, "< %s >", zone_label());
+        else if (i == 1) { int p = preset_of(z); snprintf(v, sizeof v, "< %s >", p >= 0 ? PRE[p].name : "Custom"); }
+        else if (i == 2) snprintf(v, sizeof v, "%d", z->r);
+        else if (i == 3) snprintf(v, sizeof v, "%d", z->g);
+        else if (i == 4) snprintf(v, sizeof v, "%d", z->b);
+        else if (i == 5) snprintf(v, sizeof v, "%d%%", z->bright);
         else { int k = 3; for (int j = 0; j < NEFF; j++) if (EFF[j] == z->effect) k = j; snprintf(v, sizeof v, "< %s >", EFFN[k]); }
-        text(F_MED, v, 620, y + 16, i == ri ? acc : white, 2);
-        if (i >= 1 && i <= 4) {
-            int val = i == 1 ? z->r : i == 2 ? z->g : i == 3 ? z->b : z->bright;
-            int mx = i == 4 ? 100 : 255;
-            SDL_Color track = {40, 42, 60, 255}, fill = i == 1 ? (SDL_Color){220, 70, 70, 255} : i == 2 ? (SDL_Color){70, 200, 90, 255} : i == 3 ? (SDL_Color){80, 110, 240, 255} : (SDL_Color){230, 200, 90, 255};
-            rect(260, y + 30, 230, 14, track);
-            rect(260, y + 30, 230 * val / mx, 14, fill);
+        text(F_MED, v, 620, y + 14, i == ri ? acc : white, 2);
+        if (i >= 2 && i <= 5) {
+            int val = i == 2 ? z->r : i == 3 ? z->g : i == 4 ? z->b : z->bright;
+            int mx = i == 5 ? 100 : 255;
+            SDL_Color track = {40, 42, 60, 255};
+            SDL_Color fill = i == 2 ? (SDL_Color){220, 70, 70, 255} : i == 3 ? (SDL_Color){70, 200, 90, 255} : i == 4 ? (SDL_Color){80, 110, 240, 255} : (SDL_Color){230, 200, 90, 255};
+            rect(280, y + 28, 200, 14, track);
+            rect(280, y + 28, 200 * val / mx, 14, fill);
         }
     }
 
@@ -199,55 +213,66 @@ static void draw(void) {
     char hex[24];
     snprintf(hex, sizeof hex, "#%02X%02X%02X", z->r, z->g, z->b);
     text(F_MED, hex, 840, 450, white, 1);
-    text(F_SMALL, z->file, 840, 492, grey, 1);
+    text(F_SMALL, zi == NSEL - 1 ? "all zones" : z->file, 840, 492, grey, 1);
 
     /* all-zone mini swatches */
     for (int i = 0; i < NZ; i++) {
         SDL_Color c = {(Uint8)Z[i].r, (Uint8)Z[i].g, (Uint8)Z[i].b, 255};
-        rect(692 + i * 60, 540, 52, 52, i == zi ? white : frame);
+        int on = (zi == NSEL - 1) || (i == zi);
+        rect(692 + i * 60, 540, 52, 52, on ? white : frame);
         rect(696 + i * 60, 544, 44, 44, c);
     }
 
     if (SDL_GetTicks() < msg_until) text(F_MED, msg, W / 2, 640, acc, 1);
-    text(F_SMALL, "D-pad: change   L1/R1: big step   A: preset   X: copy to all   START: save   B: exit", W / 2, 722, grey, 1);
+    text(F_SMALL, "D-pad: change   L1/R1: big step   A: next color   START: save   B: exit", W / 2, 722, grey, 1);
     SDL_RenderPresent(R);
 }
 
 /* ---------- logic ---------- */
 static int clampi(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
 
-static void sync_shared_brightness(void) {
-    if (!strcmp(Z[zi].file, "f1")) Z[1].bright = Z[0].bright;
-    else if (!strcmp(Z[zi].file, "f2")) Z[0].bright = Z[1].bright;
+/* f1/f2 share one brightness register */
+static void sync_shared_brightness(int idx) {
+    if (idx == 0) Z[1].bright = Z[0].bright;
+    else if (idx == 1) Z[0].bright = Z[1].bright;
+}
+/* push the edited zone (or all zones when ALL is selected) to the LEDs */
+static void commit(void) {
+    zone_t *src = cur();
+    if (zi == NSEL - 1) {
+        for (int i = 0; i < NZ; i++) {
+            if (&Z[i] != src) { Z[i].r = src->r; Z[i].g = src->g; Z[i].b = src->b; Z[i].bright = src->bright; Z[i].effect = src->effect; }
+            apply_zone(&Z[i]);
+        }
+    } else {
+        if (ri == 5) sync_shared_brightness(zi);
+        apply_zone(&Z[zi]);
+        if (ri == 5 && zi <= 1) apply_zone(&Z[zi == 0 ? 1 : 0]);
+    }
+}
+static void set_preset(int idx) {
+    zone_t *z = cur();
+    idx = (idx % NPRE + NPRE) % NPRE;
+    z->r = (PRE[idx].rgb >> 16) & 255; z->g = (PRE[idx].rgb >> 8) & 255; z->b = PRE[idx].rgb & 255;
 }
 static void change(int dir, int big) {
-    zone_t *z = &Z[zi];
+    zone_t *z = cur();
     switch (ri) {
-    case 0: zi = (zi + dir + NZ) % NZ; return;
-    case 1: z->r = clampi(z->r + dir * (big ? 32 : 8), 0, 255); break;
-    case 2: z->g = clampi(z->g + dir * (big ? 32 : 8), 0, 255); break;
-    case 3: z->b = clampi(z->b + dir * (big ? 32 : 8), 0, 255); break;
-    case 4: z->bright = clampi(z->bright + dir * (big ? 20 : 5), 0, 100); sync_shared_brightness(); break;
-    case 5: { int k = 3; for (int j = 0; j < NEFF; j++) if (EFF[j] == z->effect) k = j;
+    case 0: zi = (zi + dir + NSEL) % NSEL; return;
+    case 1: { int p = preset_of(z); set_preset(p < 0 ? (dir > 0 ? 0 : NPRE - 1) : p + dir); break; }
+    case 2: z->r = clampi(z->r + dir * (big ? 32 : 8), 0, 255); break;
+    case 3: z->g = clampi(z->g + dir * (big ? 32 : 8), 0, 255); break;
+    case 4: z->b = clampi(z->b + dir * (big ? 32 : 8), 0, 255); break;
+    case 5: z->bright = clampi(z->bright + dir * (big ? 20 : 5), 0, 100); break;
+    case 6: { int k = 3; for (int j = 0; j < NEFF; j++) if (EFF[j] == z->effect) k = j;
               k = (k + dir + NEFF) % NEFF; z->effect = EFF[k]; break; }
     }
-    apply_zone(z);
-    if (ri == 4 && (!strcmp(z->file, "f1") || !strcmp(z->file, "f2"))) apply_zone(&Z[!strcmp(z->file, "f1") ? 1 : 0]);
+    commit();
 }
-static void do_preset(void) {
-    if (ri < 1 || ri > 3) return;
-    unsigned c = PRESET[preset_idx++ % NPRESET];
-    Z[zi].r = (c >> 16) & 255; Z[zi].g = (c >> 8) & 255; Z[zi].b = c & 255;
-    apply_zone(&Z[zi]);
-}
-static void copy_all(void) {
-    for (int i = 0; i < NZ; i++) {
-        if (i == zi) continue;
-        Z[i].r = Z[zi].r; Z[i].g = Z[zi].g; Z[i].b = Z[zi].b;
-        Z[i].bright = Z[zi].bright; Z[i].effect = Z[zi].effect;
-        apply_zone(&Z[i]);
-    }
-    set_msg("Copied to all zones");
+static void next_preset(void) {
+    int p = preset_of(cur());
+    set_preset(p < 0 ? 0 : p + 1);
+    commit();
 }
 static void do_save(void) {
     if (save_settings() == 0) { memcpy(ORIG, Z, sizeof Z); set_msg("Saved to NextUI settings"); }
@@ -293,8 +318,7 @@ int main(void) {
             } else if (e.type == SDL_JOYBUTTONDOWN) {
                 switch (e.jbutton.button) {
                 case 0: running = 0; break;              /* B: exit */
-                case 1: do_preset(); break;              /* A */
-                case 3: copy_all(); break;               /* X */
+                case 1: next_preset(); break;           /* A */
                 case 4: change(-1, 1); break;            /* L1 */
                 case 5: change(1, 1); break;             /* R1 */
                 case 7: do_save(); break;               /* START */
@@ -307,8 +331,7 @@ int main(void) {
                 case SDLK_DOWN: ri = (ri + 1) % NROW; break;
                 case SDLK_LEFT: change(-1, 0); break;
                 case SDLK_RIGHT: change(1, 0); break;
-                case SDLK_RETURN: do_preset(); break;
-                case SDLK_x: copy_all(); break;
+                case SDLK_RETURN: next_preset(); break;
                 case SDLK_s: do_save(); break;
                 default: break;
                 }
