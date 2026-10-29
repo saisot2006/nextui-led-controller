@@ -51,6 +51,20 @@ static zone_t Z[NZ] = {
 static zone_t ORIG[NZ];      /* trạng thái lúc mở app / lần lưu gần nhất, dùng để hoàn tác khi thoát */
 static int touched[NZ];      /* vùng đã bị app thay đổi */
 
+/* ---------- chế độ từng đèn (frame_hex, 22 vị trí) ---------- */
+#define NLED 22
+typedef struct { int r, g, b, on; } led_t;
+static led_t LED[NLED], LED_ORIG[NLED];
+static int fmode = 0, orig_mode = 0;          /* 0 = theo vùng, 1 = từng đèn */
+static int led_loaded = 0, frame_ready = 0, frame_used = 0;
+static int fgrp = 5, fidx = 0, fquick = 0;    /* nhóm (5 = tất cả), đèn trong nhóm (0 = cả nhóm), tạo nhanh */
+/* bảng vị trí đã đo trên Brick Pro: thanh trên 1-8, FN 9-10, joystick trái 11-14, joystick phải 15-18, mặt sau 19-22 */
+static const int GSTART[5] = {0, 8, 10, 14, 18};
+static const int GCOUNT[5] = {8, 2, 4, 4, 4};
+static const char *GNAME[6] = {"Thanh trên", "Phím FN", "Joystick trái", "Joystick phải", "Mặt sau", "Tất cả đèn"};
+static const char *FROWN[8] = {"Nhóm", "Đèn", "Màu", "Đỏ", "Xanh lá", "Xanh dương", "Độ sáng", "Tạo nhanh"};
+static const char *QNAME[3] = {"Không", "Cầu vồng", "Một màu"};
+
 static const int EFF[] = {1, 2, 3, 4, 5, 6, 7};
 static const char *EFFN[] = {"Tuyến tính", "Thở", "Sniff", "Đứng yên", "Nháy 1", "Nháy 2", "Nháy 3"};
 #define NEFF 7
@@ -123,6 +137,36 @@ static void apply_zone(int idx, const zone_t *z, int force_full) {
     Z[idx].primed = 1;
 }
 
+/* ---- chế độ từng đèn: ghi frame_hex đúng 1 lần là giữ màu (đã thử trên máy) ---- */
+static const char *ZALL[7] = {"m", "f1", "f2", "lr", "rear", "l", "r"};
+static void frame_setup(void) {        /* tắt hệ effect theo vùng để frame_hex điều khiển */
+    for (int i = 0; i < 7; i++) { wr_zone("effect_rgb_hex", ZALL[i], "000000"); wr_zone("effect", ZALL[i], "0"); }
+    wr("effect_enable", "0");
+}
+static void frame_build(char *out, size_t n) {
+    size_t o = 0;
+    out[0] = 0;
+    for (int i = 0; i < NLED && o + 8 < n; i++)
+        o += (size_t)snprintf(out + o, n - o, "%02X%02X%02X ",
+                              (unsigned)(LED[i].on ? LED[i].r : 0), (unsigned)(LED[i].on ? LED[i].g : 0), (unsigned)(LED[i].on ? LED[i].b : 0));
+}
+static void frame_write(void) {
+    char v[16], buf[NLED * 8 + 8];
+    snprintf(v, sizeof v, "%d", Z[Z_M].bright);    wr("max_scale", v);
+    snprintf(v, sizeof v, "%d", Z[Z_F1].bright);   wr("max_scale_f1f2", v);
+    snprintf(v, sizeof v, "%d", Z[Z_L].bright);    wr("max_scale_lr", v);
+    snprintf(v, sizeof v, "%d", Z[Z_REAR].bright); wr("max_scale_rear", v);
+    frame_build(buf, sizeof buf);
+    wr("frame_hex", buf);
+    wr("effect_enable", "1"); wr("effect_enable", "0");
+}
+static void ensure_frame(void) { if (!frame_ready) { frame_setup(); frame_ready = 1; } }
+static void frame_leave(void) {        /* về chế độ theo vùng: bật lại hệ effect và ghi đủ 6 vùng */
+    wr("effect_enable", "1");
+    for (int i = 0; i < NZ; i++) apply_zone(i, &Z[i], 1);
+    frame_ready = 0;
+}
+
 /* ---------- cài đặt ---------- */
 static void shared_dir(char *out, size_t n) {
     const char *sd = getenv("SDCARD_PATH");
@@ -193,7 +237,7 @@ static void read_hardware(void) {
 }
 /* tệp trạng thái riêng của app: nhớ màu gốc của vùng đang tắt (NextUI chỉ lưu được màu đen) */
 static void load_state_file(void) {
-    char p[256], line[128];
+    char p[256], line[512];
     state_path(p, sizeof p);
     FILE *f = fopen(p, "r");
     if (!f) return;
@@ -202,6 +246,20 @@ static void load_state_file(void) {
         char *eq = strchr(line, '=');
         if (!eq) continue;
         *eq = 0;
+        if (!strcmp(line, "mode")) { fmode = atoi(eq + 1) == 1; continue; }
+        if (!strcmp(line, "fleds")) {               /* "RRGGBB:bật" cho 22 đèn */
+            const char *q = eq + 1;
+            int k = 0;
+            while (k < NLED && *q) {
+                unsigned c; int o, used = 0;
+                if (sscanf(q, "%6x:%d%n", &c, &o, &used) < 2) break;
+                LED[k].r = (int)((c >> 16) & 255); LED[k].g = (int)((c >> 8) & 255); LED[k].b = (int)(c & 255); LED[k].on = o != 0;
+                k++; q += used;
+                while (*q == ' ') q++;
+            }
+            if (k == NLED) led_loaded = 1;
+            continue;
+        }
         int i = -1;
         for (int k = 0; k < NZ; k++) if (!strcmp(Z[k].file, line)) i = k;
         if (i < 0) continue;
@@ -240,7 +298,17 @@ static int save_settings(void) {
     state_path(p, sizeof p);
     f = fopen(p, "w");
     if (f) {
-        for (int i = 0; i < NZ; i++) fprintf(f, "%s=%d,%d,%d,%d\n", Z[i].file, Z[i].on, Z[i].r, Z[i].g, Z[i].b);
+        for (int i = 0; i < NZ; i++) fprintf(f, "%s=%d,%d,%d,%d,%d\n", Z[i].file, Z[i].on, Z[i].r, Z[i].g, Z[i].b, Z[i].effect);   /* effect dùng cho hook giữ màu joystick */
+        fprintf(f, "mode=%d\n", fmode);
+        if (led_loaded) {
+            char buf[NLED * 8 + 8];
+            fputs("fleds=", f);
+            for (int i = 0; i < NLED; i++) fprintf(f, "%02X%02X%02X:%d%s", (unsigned)LED[i].r, (unsigned)LED[i].g, (unsigned)LED[i].b, LED[i].on, i + 1 < NLED ? " " : "");
+            fputc('\n', f);
+            frame_build(buf, sizeof buf);          /* màu thực tế (đèn tắt = 000000) cho hook */
+            fprintf(f, "frame=%s\n", buf);
+            fprintf(f, "fscale=%d,%d,%d,%d\n", Z[Z_M].bright, Z[Z_F1].bright, Z[Z_L].bright, Z[Z_REAR].bright);
+        }
         fclose(f);
     }
     return 0;
@@ -315,7 +383,9 @@ static int mixed(int mask) {
     return 0;
 }
 
+static void fdraw(void);
 static void draw(void) {
+    if (fmode) { fdraw(); return; }
     SDL_Color bg = {18, 18, 26, 255}, white = {235, 235, 240, 255}, grey = {140, 140, 155, 255};
     SDL_Color sel = {52, 58, 96, 255}, acc = {120, 170, 255, 255};
     rect(0, 0, W, H, bg);
@@ -375,7 +445,7 @@ static void draw(void) {
     }
 
     if (SDL_GetTicks() < msg_until) text(F_SMALL, msg, 840, 600, acc, 1);
-    text(F_SMALL, "D-pad: đổi  L1/R1: nhảy  A: màu kế  X: bật/tắt  START: lưu  B: thoát", W / 2, 726, grey, 1);
+    text(F_SMALL, "D-pad: đổi  L1/R1: nhảy  A: màu kế  X: bật/tắt  Y: từng đèn  START: lưu  B: thoát", W / 2, 726, grey, 1);
     SDL_RenderPresent(R);
 }
 
@@ -447,6 +517,8 @@ static void do_save(void) {
     int diff = Z[Z_L].r != Z[Z_R].r || Z[Z_L].g != Z[Z_R].g || Z[Z_L].b != Z[Z_R].b || Z[Z_L].on != Z[Z_R].on;
     if (save_settings() == 0) {
         memcpy(ORIG, Z, sizeof Z);
+        memcpy(LED_ORIG, LED, sizeof LED);
+        orig_mode = fmode;
         memset(touched, 0, sizeof touched);
         set_msg(diff ? "Đã lưu (NextUI chỉ nhớ 1 màu cho 2 joystick)" : "Đã lưu vào cài đặt NextUI");
     } else set_msg("Lưu thất bại");
@@ -454,6 +526,206 @@ static void do_save(void) {
 /* thoát mà chưa lưu: chỉ hoàn tác các vùng app đã đổi */
 static void quit_restore(void) {
     for (int i = 0; i < NZ; i++) if (touched[i]) apply_zone(i, &ORIG[i], 1);
+}
+
+
+/* ---------- chế độ từng đèn: giao diện và logic ---------- */
+static void led_from(led_t *l, const zone_t *z) { l->r = z->r; l->g = z->g; l->b = z->b; l->on = z->on; }
+static void led_init_from_zones(void) {          /* lần đầu vào chế độ này: lấy màu từ các vùng hiện tại */
+    for (int i = 0; i < 8; i++) led_from(&LED[i], &Z[Z_M]);
+    led_from(&LED[8], &Z[Z_F2]);                 /* vị trí 9 = phím FN phải */
+    led_from(&LED[9], &Z[Z_F1]);                 /* vị trí 10 = phím FN trái */
+    for (int i = 10; i < 14; i++) led_from(&LED[i], &Z[Z_L]);
+    for (int i = 14; i < 18; i++) led_from(&LED[i], &Z[Z_R]);
+    for (int i = 18; i < 22; i++) led_from(&LED[i], &Z[Z_REAR]);
+    led_loaded = 1;
+}
+static void fsel(int *st, int *cnt) {            /* các đèn đang chọn */
+    if (fgrp == 5) { *st = 0; *cnt = NLED; }
+    else if (fidx == 0) { *st = GSTART[fgrp]; *cnt = GCOUNT[fgrp]; }
+    else { *st = GSTART[fgrp] + fidx - 1; *cnt = 1; }
+}
+static int fidx_max(void) { return fgrp == 5 ? 0 : GCOUNT[fgrp]; }
+static int fmixed(int mask) {
+    int st, cnt;
+    fsel(&st, &cnt);
+    for (int k = 1; k < cnt; k++) {
+        if ((mask & F_ON) && LED[st + k].on != LED[st].on) return 1;
+        if ((mask & F_R) && LED[st + k].r != LED[st].r) return 1;
+        if ((mask & F_G) && LED[st + k].g != LED[st].g) return 1;
+        if ((mask & F_B) && LED[st + k].b != LED[st].b) return 1;
+    }
+    return 0;
+}
+static int preset_of_rgb(int r, int g, int b) {
+    unsigned c = ((unsigned)r << 16) | ((unsigned)g << 8) | (unsigned)b;
+    for (int i = 0; i < NPRE; i++) if (PRE[i].rgb == c) return i;
+    return -1;
+}
+/* độ sáng theo thanh ghi: thanh trên = max_scale, FN = f1f2, hai vòng joystick = lr, mặt sau = rear */
+static int fbright_cur(void) {
+    switch (fgrp) {
+    case 1: return Z[Z_F1].bright;
+    case 2: case 3: return Z[Z_L].bright;
+    case 4: return Z[Z_REAR].bright;
+    default: return Z[Z_M].bright;
+    }
+}
+static int fbright_mixed(void) {
+    return fgrp == 5 && (Z[Z_M].bright != Z[Z_F1].bright || Z[Z_M].bright != Z[Z_L].bright || Z[Z_M].bright != Z[Z_REAR].bright);
+}
+static void fbright_set(int v) {
+    if (fgrp == 5 || fgrp == 0) Z[Z_M].bright = v;
+    if (fgrp == 5 || fgrp == 1) Z[Z_F1].bright = Z[Z_F2].bright = v;
+    if (fgrp == 5 || fgrp == 2 || fgrp == 3) Z[Z_L].bright = Z[Z_R].bright = v;
+    if (fgrp == 5 || fgrp == 4) Z[Z_REAR].bright = v;
+}
+static void fapply(void) { ensure_frame(); frame_write(); }
+
+static void fset_preset(int idx) {
+    int st, cnt;
+    fsel(&st, &cnt);
+    idx = (idx % NPRE + NPRE) % NPRE;
+    for (int k = 0; k < cnt; k++) {
+        LED[st + k].r = (int)((PRE[idx].rgb >> 16) & 255); LED[st + k].g = (int)((PRE[idx].rgb >> 8) & 255); LED[st + k].b = (int)(PRE[idx].rgb & 255);
+        LED[st + k].on = 1;
+    }
+}
+static void fchange(int dir, int big) {
+    int st, cnt;
+    fsel(&st, &cnt);
+    led_t *c = &LED[st];
+    int step = big ? 32 : 8;
+    switch (ri) {
+    case 0: fgrp = (fgrp + dir + 6) % 6; fidx = 0; return;
+    case 1: { int m = fidx_max(); if (m == 0) return; fidx = (fidx + dir + m + 1) % (m + 1); return; }
+    case 2: { int p = preset_of_rgb(c->r, c->g, c->b); fset_preset(p < 0 ? (dir > 0 ? 0 : NPRE - 1) : p + dir); break; }
+    case 3: { int v = clampi(c->r + dir * step, 0, 255); for (int k = 0; k < cnt; k++) { LED[st + k].r = v; LED[st + k].on = 1; } break; }
+    case 4: { int v = clampi(c->g + dir * step, 0, 255); for (int k = 0; k < cnt; k++) { LED[st + k].g = v; LED[st + k].on = 1; } break; }
+    case 5: { int v = clampi(c->b + dir * step, 0, 255); for (int k = 0; k < cnt; k++) { LED[st + k].b = v; LED[st + k].on = 1; } break; }
+    case 6: fbright_set(clampi(fbright_cur() + dir * (big ? 20 : 5), 0, 100)); break;
+    case 7: {
+        fquick = (fquick + dir + 3) % 3;
+        if (fquick == 1) {                       /* cầu vồng: mỗi đèn một màu theo thứ tự */
+            for (int k = 0; k < cnt; k++) {
+                unsigned col = PRE[k % 8].rgb;
+                LED[st + k].r = (int)((col >> 16) & 255); LED[st + k].g = (int)((col >> 8) & 255); LED[st + k].b = (int)(col & 255); LED[st + k].on = 1;
+            }
+        } else if (fquick == 2) {                /* một màu: mọi đèn đang chọn cùng màu của đèn đầu tiên */
+            led_t first = LED[st];
+            for (int k = 0; k < cnt; k++) { LED[st + k] = first; LED[st + k].on = 1; }
+        }
+        break;
+    }
+    }
+    fapply();
+}
+static void fnext_preset(void) {
+    int st, cnt;
+    fsel(&st, &cnt);
+    int p = preset_of_rgb(LED[st].r, LED[st].g, LED[st].b);
+    fset_preset(p < 0 ? 0 : p + 1);
+    fapply();
+}
+static void ftoggle(void) {
+    int st, cnt, any = 0;
+    fsel(&st, &cnt);
+    for (int k = 0; k < cnt; k++) if (LED[st + k].on) any = 1;
+    for (int k = 0; k < cnt; k++) LED[st + k].on = !any;
+    fapply();
+    set_msg(any ? "Đã tắt" : "Đã bật");
+}
+static void toggle_mode(void) {
+    if (!fmode) {                                  /* theo vùng -> từng đèn */
+        if (!led_loaded) led_init_from_zones();
+        fmode = 1; frame_used = 1;
+        fapply();
+        set_msg("Chế độ từng đèn");
+    } else {                                       /* từng đèn -> theo vùng */
+        fmode = 0;
+        frame_leave();
+        set_msg("Chế độ theo vùng");
+    }
+}
+static void fdraw(void) {
+    SDL_Color bg = {18, 18, 26, 255}, white = {235, 235, 240, 255}, grey = {140, 140, 155, 255};
+    SDL_Color sel = {52, 58, 96, 255}, acc = {120, 170, 255, 255}, frame = {70, 72, 95, 255}, dark = {30, 30, 42, 255};
+    rect(0, 0, W, H, bg);
+    text(F_BIG, "Điều khiển LED - Từng đèn", W / 2, 16, white, 1);
+    int st, cnt;
+    fsel(&st, &cnt);
+    led_t *c = &LED[st];
+    int m_on = fmixed(F_ON), m_col = fmixed(F_R | F_G | F_B), m_r = fmixed(F_R), m_g = fmixed(F_G), m_b = fmixed(F_B), m_br = fbright_mixed();
+    int y0 = 84, rh = 68;
+    for (int i = 0; i < NROW; i++) {
+        int y = y0 + i * rh;
+        if (i == ri) rect(40, y, 600, rh - 8, sel);
+        text(F_MED, FROWN[i], 64, y + 12, i == ri ? white : grey, 0);
+        char v[48] = "";
+        if (i == 0) snprintf(v, sizeof v, "< %s >", GNAME[fgrp]);
+        else if (i == 1) { if (fgrp == 5) snprintf(v, sizeof v, "Tất cả"); else if (fidx == 0) snprintf(v, sizeof v, "< Cả nhóm >"); else snprintf(v, sizeof v, "< Đèn %d >", fidx); }
+        else if (i == 2) { int p = preset_of_rgb(c->r, c->g, c->b); snprintf(v, sizeof v, "< %s >", m_col ? "Nhiều màu" : m_on ? "Một phần tắt" : p >= 0 ? PRE[p].name : "Tùy chỉnh"); }
+        else if (i == 3) snprintf(v, sizeof v, m_r ? "—" : "%d", c->r);
+        else if (i == 4) snprintf(v, sizeof v, m_g ? "—" : "%d", c->g);
+        else if (i == 5) snprintf(v, sizeof v, m_b ? "—" : "%d", c->b);
+        else if (i == 6) snprintf(v, sizeof v, m_br ? "—" : "%d%%", fbright_cur());
+        else snprintf(v, sizeof v, "< %s >", QNAME[fquick]);
+        text(F_MED, v, 620, y + 12, i == ri ? acc : white, 2);
+        int mm = i == 3 ? m_r : i == 4 ? m_g : i == 5 ? m_b : m_br;
+        if (i >= 3 && i <= 6 && !mm) {
+            int val = i == 3 ? c->r : i == 4 ? c->g : i == 5 ? c->b : fbright_cur();
+            int mx = i == 6 ? 100 : 255;
+            SDL_Color track = {40, 42, 60, 255};
+            SDL_Color fill = i == 3 ? (SDL_Color){220, 70, 70, 255} : i == 4 ? (SDL_Color){70, 200, 90, 255} : i == 5 ? (SDL_Color){80, 110, 240, 255} : (SDL_Color){230, 200, 90, 255};
+            rect(300, y + 26, 190, 14, track);
+            rect(300, y + 26, 190 * val / mx, 14, fill);
+        }
+    }
+
+    /* sơ đồ máy: mỗi ô là một đèn, viền trắng = đang chọn */
+    rect(692, 110, 296, 330, frame);
+    rect(696, 114, 288, 322, bg);
+    int px[NLED], py[NLED], pw[NLED], ph[NLED];
+    for (int i = 0; i < 8; i++) { px[i] = 704 + i * 35; py[i] = 126; pw[i] = 30; ph[i] = 16; }       /* thanh trên */
+    px[9] = 768; py[9] = 172; pw[9] = 48; ph[9] = 18;                                                  /* FN trái (vị trí 10) */
+    px[8] = 860; py[8] = 172; pw[8] = 48; ph[8] = 18;                                                  /* FN phải (vị trí 9) */
+    static const int RX[4] = {0, 34, 0, -34}, RY[4] = {-34, 0, 34, 0};
+    for (int k = 0; k < 4; k++) {
+        px[10 + k] = 770 + RX[k] - 10; py[10 + k] = 280 + RY[k] - 10; pw[10 + k] = 20; ph[10 + k] = 20;   /* vòng trái */
+        px[14 + k] = 910 + RX[k] - 10; py[14 + k] = 280 + RY[k] - 10; pw[14 + k] = 20; ph[14 + k] = 20;   /* vòng phải */
+        px[18 + k] = 710 + k * 68; py[18 + k] = 380; pw[18 + k] = 56; ph[18 + k] = 22;                    /* mặt sau */
+    }
+    for (int i = 0; i < NLED; i++) {
+        int inside = i >= st && i < st + cnt;
+        if (inside) rect(px[i] - 3, py[i] - 3, pw[i] + 6, ph[i] + 6, white);
+        SDL_Color col = LED[i].on ? (SDL_Color){(Uint8)LED[i].r, (Uint8)LED[i].g, (Uint8)LED[i].b, 255} : dark;
+        rect(px[i], py[i], pw[i], ph[i], col);
+    }
+    char cap[64];
+    if (cnt == 1) snprintf(cap, sizeof cap, "đèn số %d  #%02X%02X%02X", st + 1, c->r, c->g, c->b);
+    else snprintf(cap, sizeof cap, "%d đèn đang chọn", cnt);
+    text(F_SMALL, cap, 840, 455, grey, 1);
+
+    if (SDL_GetTicks() < msg_until) text(F_SMALL, msg, 840, 600, acc, 1);
+    text(F_SMALL, "D-pad: đổi  L1/R1: nhảy  A: màu kế  X: bật/tắt  Y: theo vùng  START: lưu  B: thoát", W / 2, 726, grey, 1);
+    SDL_RenderPresent(R);
+}
+
+/* chuyển lệnh theo chế độ hiện tại */
+static void dispatch_change(int dir, int big) { if (fmode) fchange(dir, big); else change(dir, big); }
+static void dispatch_toggle(void) { if (fmode) ftoggle(); else toggle_on(); }
+static void dispatch_preset(void) { if (fmode) fnext_preset(); else next_preset(); }
+
+/* thoát mà chưa lưu: trả đèn về đúng trạng thái lúc mở app / lần lưu gần nhất */
+static void quit_all(void) {
+    if (orig_mode == 0) {
+        if (frame_used) { wr("effect_enable", "1"); for (int i = 0; i < NZ; i++) apply_zone(i, &ORIG[i], 1); }
+        else quit_restore();
+    } else {
+        memcpy(LED, LED_ORIG, sizeof LED);
+        for (int i = 0; i < NZ; i++) Z[i].bright = ORIG[i].bright;
+        fapply();
+    }
 }
 
 /* ---------- vòng lặp ---------- */
@@ -468,15 +740,16 @@ static void handle_event(const SDL_Event *e) {
         hx = (e->jhat.value & SDL_HAT_LEFT) ? -1 : (e->jhat.value & SDL_HAT_RIGHT) ? 1 : 0;
         hy = (e->jhat.value & SDL_HAT_UP) ? -1 : (e->jhat.value & SDL_HAT_DOWN) ? 1 : 0;
         if (hy) ri = (ri + hy + NROW) % NROW;
-        if (hx) change(hx, 0);
+        if (hx) dispatch_change(hx, 0);
         next_rep = SDL_GetTicks() + 350;
     } else if (e->type == SDL_JOYBUTTONDOWN) {
         switch (e->jbutton.button) {
         case 0: running = 0; break;              /* B: thoát */
-        case 1: next_preset(); break;            /* A */
-        case 3: toggle_on(); break;              /* X */
-        case 4: change(-1, 1); break;            /* L1 */
-        case 5: change(1, 1); break;             /* R1 */
+        case 1: dispatch_preset(); break;        /* A */
+        case 2: toggle_mode(); break;            /* Y: đổi chế độ */
+        case 3: dispatch_toggle(); break;        /* X */
+        case 4: dispatch_change(-1, 1); break;   /* L1 */
+        case 5: dispatch_change(1, 1); break;    /* R1 */
         case 7: do_save(); break;                /* START */
         default: break;
         }
@@ -485,10 +758,11 @@ static void handle_event(const SDL_Event *e) {
         case SDLK_ESCAPE: running = 0; break;
         case SDLK_UP: ri = (ri + NROW - 1) % NROW; break;
         case SDLK_DOWN: ri = (ri + 1) % NROW; break;
-        case SDLK_LEFT: change(-1, 0); break;
-        case SDLK_RIGHT: change(1, 0); break;
-        case SDLK_RETURN: next_preset(); break;
-        case SDLK_x: toggle_on(); break;
+        case SDLK_LEFT: dispatch_change(-1, 0); break;
+        case SDLK_RIGHT: dispatch_change(1, 0); break;
+        case SDLK_RETURN: dispatch_preset(); break;
+        case SDLK_x: dispatch_toggle(); break;
+        case SDLK_y: toggle_mode(); break;
         case SDLK_s: do_save(); break;
         default: break;
         }
@@ -519,7 +793,10 @@ int main(void) {
 
     /* nạp trạng thái; KHÔNG ghi gì xuống đèn lúc mở app */
     load_all();
+    if (fmode && !led_loaded) fmode = 0;
     memcpy(ORIG, Z, sizeof Z);
+    memcpy(LED_ORIG, LED, sizeof LED);
+    orig_mode = fmode;
 
     int msg_shown = 0, redraw = 1;
     SDL_Event e;
@@ -538,9 +815,9 @@ int main(void) {
             do { handle_event(&e); } while (SDL_PollEvent(&e));
             redraw = 1;
         }
-        if (hx && SDL_GetTicks() >= next_rep) { change(hx, 0); next_rep = SDL_GetTicks() + 90; redraw = 1; }
+        if (hx && SDL_GetTicks() >= next_rep) { dispatch_change(hx, 0); next_rep = SDL_GetTicks() + 90; redraw = 1; }
     }
-    quit_restore();
+    quit_all();
     TTF_Quit();
     SDL_Quit();
     return 0;
