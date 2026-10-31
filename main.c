@@ -689,7 +689,8 @@ static void fdraw(void) {
     for (int i = 0; i < 8; i++) { px[i] = 704 + i * 35; py[i] = 126; pw[i] = 30; ph[i] = 16; }       /* thanh trên */
     px[9] = 768; py[9] = 172; pw[9] = 48; ph[9] = 18;                                                  /* FN trái (vị trí 10) */
     px[8] = 860; py[8] = 172; pw[8] = 48; ph[8] = 18;                                                  /* FN phải (vị trí 9) */
-    static const int RX[4] = {0, 34, 0, -34}, RY[4] = {-34, 0, 34, 0};
+    /* 4 đèn mỗi vòng ở 4 góc, ngược chiều kim đồng hồ từ góc trên-trái (đã đo bằng LED Single Test) */
+    static const int RX[4] = {-26, -26, 26, 26}, RY[4] = {-26, 26, 26, -26};
     for (int k = 0; k < 4; k++) {
         px[10 + k] = 770 + RX[k] - 10; py[10 + k] = 280 + RY[k] - 10; pw[10 + k] = 20; ph[10 + k] = 20;   /* vòng trái */
         px[14 + k] = 910 + RX[k] - 10; py[14 + k] = 280 + RY[k] - 10; pw[14 + k] = 20; ph[14 + k] = 20;   /* vòng phải */
