@@ -19,6 +19,7 @@
 #define W 1024
 #define H 768
 #define NZ 6
+#define BR_MAX 60            /* help của driver: max_scale 0 ~ "tg5040 limit brightness 60" */
 #define NROW 8
 #define NSEL 7   /* 6 vùng + "Tất cả đèn" */
 #ifndef LED_DIR
@@ -215,21 +216,37 @@ static void load_nextui_file(void) {
     /* f2 dùng độ sáng của f1, giống NextUI (NextUI bỏ qua độ sáng của f2) */
     Z[Z_F2].bright = Z[Z_F1].bright;
 }
+/* Phần cứng đang ở chế độ frame? (đã lưu mode=1, hoặc effect_enable = 0).
+ * Khi đó màu các vùng trên phần cứng bị ghi đen và effect = 0 (xem frame_setup), nên KHÔNG đọc màu vùng từ đó. */
+static int hardware_in_frame_mode(void) {
+    char p[256], line[512], b[32];
+    int frame = 0;
+    state_path(p, sizeof p);
+    FILE *f = fopen(p, "r");
+    if (f) {
+        while (fgets(line, sizeof line, f)) if (!strncmp(line, "mode=1", 6)) frame = 1;
+        fclose(f);
+    }
+    if (rd_file("effect_enable", b, sizeof b) && atoi(b) == 0) frame = 1;
+    return frame;
+}
 /* trạng thái thật đang có trên đèn (nếu đọc được) là nguồn đúng nhất */
-static void read_hardware(void) {
+static void read_hardware(int read_zone_colors) {
     char b[64];
     for (int i = 0; i < NZ; i++) {
         zone_t *z = &Z[i];
         char key[64];
-        snprintf(key, sizeof key, "effect_rgb_hex_%s", z->file);
-        if (rd_file(key, b, sizeof b) && strlen(b) >= 6) {
-            char hex[7]; memcpy(hex, b, 6); hex[6] = 0;
-            char *end; unsigned long c = strtoul(hex, &end, 16);
-            if (*end == 0) { z->r = (c >> 16) & 255; z->g = (c >> 8) & 255; z->b = c & 255; }
+        if (read_zone_colors) {
+            snprintf(key, sizeof key, "effect_rgb_hex_%s", z->file);
+            if (rd_file(key, b, sizeof b) && strlen(b) >= 6) {
+                char hex[7]; memcpy(hex, b, 6); hex[6] = 0;
+                char *end; unsigned long c = strtoul(hex, &end, 16);
+                if (*end == 0) { z->r = (c >> 16) & 255; z->g = (c >> 8) & 255; z->b = c & 255; }
+            }
+            snprintf(key, sizeof key, "effect_%s", z->file);
+            if (rd_file(key, b, sizeof b)) { int e = atoi(b); if (e >= 1 && e <= 7) z->effect = e; }
         }
-        snprintf(key, sizeof key, "effect_%s", z->file);
-        if (rd_file(key, b, sizeof b)) { int e = atoi(b); if (e >= 1 && e <= 7) z->effect = e; }
-        const char *sf = scale_file(i);
+        const char *sf = scale_file(i);   /* thanh ghi độ sáng vẫn đúng ở cả hai chế độ */
         if (sf && rd_file(sf, b, sizeof b)) { int v = atoi(b); if (v >= 0 && v <= 100) z->bright = v; }
     }
     Z[Z_F2].bright = Z[Z_F1].bright;
@@ -273,11 +290,11 @@ static void load_state_file(void) {
 }
 static void load_all(void) {
     load_nextui_file();
-    read_hardware();
+    read_hardware(!hardware_in_frame_mode());
     load_state_file();
     for (int i = 0; i < NZ; i++) {
         if (Z[i].bright < 0) Z[i].bright = 0;
-        if (Z[i].bright > 100) Z[i].bright = 100;
+        if (Z[i].bright > BR_MAX) Z[i].bright = BR_MAX;
         if (Z[i].effect < 1 || Z[i].effect > 7) Z[i].effect = 4;
     }
 }
@@ -411,7 +428,7 @@ static void draw(void) {
         int mm = i == 3 ? m_r : i == 4 ? m_g : i == 5 ? m_b : m_br;
         if (i >= 3 && i <= 6 && !mm) {
             int val = i == 3 ? z->r : i == 4 ? z->g : i == 5 ? z->b : z->bright;
-            int mx = i == 6 ? 100 : 255;
+            int mx = i == 6 ? BR_MAX : 255;
             SDL_Color track = {40, 42, 60, 255};
             SDL_Color fill = i == 3 ? (SDL_Color){220, 70, 70, 255} : i == 4 ? (SDL_Color){70, 200, 90, 255} : i == 5 ? (SDL_Color){80, 110, 240, 255} : (SDL_Color){230, 200, 90, 255};
             rect(300, y + 26, 190, 14, track);
@@ -502,7 +519,7 @@ static void change(int dir, int big) {
     case 3: z->r = clampi(z->r + dir * (big ? 32 : 8), 0, 255); mask = F_R; break;
     case 4: z->g = clampi(z->g + dir * (big ? 32 : 8), 0, 255); mask = F_G; break;
     case 5: z->b = clampi(z->b + dir * (big ? 32 : 8), 0, 255); mask = F_B; break;
-    case 6: z->bright = clampi(z->bright + dir * (big ? 20 : 5), 0, 100); mask = F_BR; break;
+    case 6: z->bright = clampi(z->bright + dir * (big ? 20 : 5), 0, BR_MAX); mask = F_BR; break;
     case 7: { int k = 3; for (int j = 0; j < NEFF; j++) if (EFF[j] == z->effect) k = j;
               k = (k + dir + NEFF) % NEFF; z->effect = EFF[k]; mask = F_EF; break; }
     }
@@ -603,7 +620,7 @@ static void fchange(int dir, int big) {
     case 3: { int v = clampi(c->r + dir * step, 0, 255); for (int k = 0; k < cnt; k++) { LED[st + k].r = v; LED[st + k].on = 1; } break; }
     case 4: { int v = clampi(c->g + dir * step, 0, 255); for (int k = 0; k < cnt; k++) { LED[st + k].g = v; LED[st + k].on = 1; } break; }
     case 5: { int v = clampi(c->b + dir * step, 0, 255); for (int k = 0; k < cnt; k++) { LED[st + k].b = v; LED[st + k].on = 1; } break; }
-    case 6: fbright_set(clampi(fbright_cur() + dir * (big ? 20 : 5), 0, 100)); break;
+    case 6: fbright_set(clampi(fbright_cur() + dir * (big ? 20 : 5), 0, BR_MAX)); break;
     case 7: {
         fquick = (fquick + dir + 3) % 3;
         if (fquick == 1) {                       /* cầu vồng: mỗi đèn một màu theo thứ tự */
@@ -674,7 +691,7 @@ static void fdraw(void) {
         int mm = i == 3 ? m_r : i == 4 ? m_g : i == 5 ? m_b : m_br;
         if (i >= 3 && i <= 6 && !mm) {
             int val = i == 3 ? c->r : i == 4 ? c->g : i == 5 ? c->b : fbright_cur();
-            int mx = i == 6 ? 100 : 255;
+            int mx = i == 6 ? BR_MAX : 255;
             SDL_Color track = {40, 42, 60, 255};
             SDL_Color fill = i == 3 ? (SDL_Color){220, 70, 70, 255} : i == 4 ? (SDL_Color){70, 200, 90, 255} : i == 5 ? (SDL_Color){80, 110, 240, 255} : (SDL_Color){230, 200, 90, 255};
             rect(300, y + 26, 190, 14, track);
