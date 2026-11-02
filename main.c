@@ -59,6 +59,10 @@ static led_t LED[NLED], LED_ORIG[NLED];
 static int fmode = 0, orig_mode = 0;          /* 0 = theo vùng, 1 = từng đèn */
 static int led_loaded = 0, frame_ready = 0, frame_used = 0;
 static int fgrp = 5, fidx = 0, fquick = 0;    /* nhóm (5 = tất cả), đèn trong nhóm (0 = cả nhóm), tạo nhanh */
+static unsigned hw_writes = 0;                /* số lần app đã ghi xuống đèn kể từ lúc mở / lần lưu gần nhất */
+static int hw_stale = 0;                      /* phần cứng đang ở chế độ frame nhưng giao diện mở ở chế độ vùng */
+static led_t SNAP[NLED];                      /* ảnh chụp màu từng đèn trước khi bị ghi đè ("Nhiều màu") */
+static int snap_valid = 0, snap_st = 0, snap_cnt = 0;
 /* bảng vị trí đã đo trên Brick Pro: thanh trên 1-8, FN 9-10, joystick trái 11-14, joystick phải 15-18, mặt sau 19-22 */
 static const int GSTART[5] = {0, 8, 10, 14, 18};
 static const int GCOUNT[5] = {8, 2, 4, 4, 4};
@@ -86,6 +90,7 @@ static void wr(const char *name, const char *val) {
     snprintf(p, sizeof p, LED_DIR "%s", name);
     FILE *f = fopen(p, "w");
     if (f) { fputs(val, f); fputc('\n', f); fclose(f); }   /* có xuống dòng, giống NextUI */
+    hw_writes++;
 }
 static void wr_zone(const char *key, const char *zone, const char *val) {
     char n[96];
@@ -121,6 +126,7 @@ static int is_primary(int i) { return scale_file(i) != NULL; }
  * Lần đầu cho vùng đó ghi đủ cycles/duration, các lần sau chỉ ghi độ sáng + màu + effect. */
 static void apply_zone(int idx, const zone_t *z, int force_full) {
     char v[32];
+    if (hw_stale) { wr("effect_enable", "1"); hw_stale = 0; }   /* phần cứng còn ở chế độ frame: bật lại hệ effect */
     int full = force_full || !Z[idx].primed;
     const char *sf = scale_file(idx);
     for (int pass = 0; pass < 2; pass++) {
@@ -141,6 +147,7 @@ static void apply_zone(int idx, const zone_t *z, int force_full) {
 /* ---- chế độ từng đèn: ghi frame_hex đúng 1 lần là giữ màu (đã thử trên máy) ---- */
 static const char *ZALL[7] = {"m", "f1", "f2", "lr", "rear", "l", "r"};
 static void frame_setup(void) {        /* tắt hệ effect theo vùng để frame_hex điều khiển */
+    hw_stale = 0;
     for (int i = 0; i < 7; i++) { wr_zone("effect_rgb_hex", ZALL[i], "000000"); wr_zone("effect", ZALL[i], "0"); }
     wr("effect_enable", "0");
 }
@@ -163,6 +170,7 @@ static void frame_write(void) {
 }
 static void ensure_frame(void) { if (!frame_ready) { frame_setup(); frame_ready = 1; } }
 static void frame_leave(void) {        /* về chế độ theo vùng: bật lại hệ effect và ghi đủ 6 vùng */
+    hw_stale = 0;
     wr("effect_enable", "1");
     for (int i = 0; i < NZ; i++) apply_zone(i, &Z[i], 1);
     frame_ready = 0;
@@ -218,8 +226,12 @@ static void load_nextui_file(void) {
 }
 /* Phần cứng đang ở chế độ frame? (đã lưu mode=1, hoặc effect_enable = 0).
  * Khi đó màu các vùng trên phần cứng bị ghi đen và effect = 0 (xem frame_setup), nên KHÔNG đọc màu vùng từ đó. */
+static int hardware_enable_off(void) {      /* phần cứng đang ở chế độ frame (effect_enable = 0)? */
+    char b[32];
+    return rd_file("effect_enable", b, sizeof b) && atoi(b) == 0;
+}
 static int hardware_in_frame_mode(void) {
-    char p[256], line[512], b[32];
+    char p[256], line[512];
     int frame = 0;
     state_path(p, sizeof p);
     FILE *f = fopen(p, "r");
@@ -227,7 +239,7 @@ static int hardware_in_frame_mode(void) {
         while (fgets(line, sizeof line, f)) if (!strncmp(line, "mode=1", 6)) frame = 1;
         fclose(f);
     }
-    if (rd_file("effect_enable", b, sizeof b) && atoi(b) == 0) frame = 1;
+    if (hardware_enable_off()) frame = 1;
     return frame;
 }
 /* trạng thái thật đang có trên đèn (nếu đọc được) là nguồn đúng nhất */
@@ -535,7 +547,8 @@ static void do_save(void) {
     if (save_settings() == 0) {
         memcpy(ORIG, Z, sizeof Z);
         memcpy(LED_ORIG, LED, sizeof LED);
-        orig_mode = fmode;
+        orig_mode = fmode;                 /* mốc mới = trạng thái vừa lưu, đang có trên đèn */
+        hw_writes = 0;
         memset(touched, 0, sizeof touched);
         set_msg(diff ? "Đã lưu (NextUI chỉ nhớ 1 màu cho 2 joystick)" : "Đã lưu vào cài đặt NextUI");
     } else set_msg("Lưu thất bại");
@@ -599,6 +612,12 @@ static void fbright_set(int v) {
 }
 static void fapply(void) { ensure_frame(); frame_write(); }
 
+static void fcapture(void) {                     /* chụp lại màu từng đèn đang chọn */
+    int st, cnt;
+    fsel(&st, &cnt);
+    for (int k = 0; k < cnt; k++) SNAP[st + k] = LED[st + k];
+    snap_valid = 1; snap_st = st; snap_cnt = cnt;
+}
 static void fset_preset(int idx) {
     int st, cnt;
     fsel(&st, &cnt);
@@ -608,15 +627,35 @@ static void fset_preset(int idx) {
         LED[st + k].on = 1;
     }
 }
+/* dòng Màu là vòng lặp: [Nhiều màu] -> 10 màu sẵn -> [Nhiều màu] ...  "Nhiều màu" khôi phục màu từng đèn đã chụp */
+static void fcolor_step(int dir) {
+    int st, cnt;
+    fsel(&st, &cnt);
+    if (fmixed(F_R | F_G | F_B)) {                /* đang ở "Nhiều màu": chụp lại rồi sang màu sẵn */
+        fcapture();
+        fset_preset(dir > 0 ? 0 : NPRE - 1);
+        return;
+    }
+    int p = preset_of_rgb(LED[st].r, LED[st].g, LED[st].b);
+    if (p < 0) { fset_preset(dir > 0 ? 0 : NPRE - 1); return; }
+    int have = snap_valid && snap_st == st && snap_cnt == cnt;
+    int np = p + dir;
+    if (have && (np < 0 || np >= NPRE)) {         /* ra khỏi hai đầu danh sách: về "Nhiều màu" */
+        for (int k = 0; k < cnt; k++) LED[st + k] = SNAP[st + k];
+        return;
+    }
+    fset_preset(np);
+}
 static void fchange(int dir, int big) {
     int st, cnt;
     fsel(&st, &cnt);
     led_t *c = &LED[st];
+    if ((ri >= 3 && ri <= 5) || ri == 7) { if (fmixed(F_R | F_G | F_B)) fcapture(); }   /* sắp ghi đè một phần: chụp để còn khôi phục được */
     int step = big ? 32 : 8;
     switch (ri) {
     case 0: fgrp = (fgrp + dir + 6) % 6; fidx = 0; return;
     case 1: { int m = fidx_max(); if (m == 0) return; fidx = (fidx + dir + m + 1) % (m + 1); return; }
-    case 2: { int p = preset_of_rgb(c->r, c->g, c->b); fset_preset(p < 0 ? (dir > 0 ? 0 : NPRE - 1) : p + dir); break; }
+    case 2: fcolor_step(dir); break;
     case 3: { int v = clampi(c->r + dir * step, 0, 255); for (int k = 0; k < cnt; k++) { LED[st + k].r = v; LED[st + k].on = 1; } break; }
     case 4: { int v = clampi(c->g + dir * step, 0, 255); for (int k = 0; k < cnt; k++) { LED[st + k].g = v; LED[st + k].on = 1; } break; }
     case 5: { int v = clampi(c->b + dir * step, 0, 255); for (int k = 0; k < cnt; k++) { LED[st + k].b = v; LED[st + k].on = 1; } break; }
@@ -638,10 +677,7 @@ static void fchange(int dir, int big) {
     fapply();
 }
 static void fnext_preset(void) {
-    int st, cnt;
-    fsel(&st, &cnt);
-    int p = preset_of_rgb(LED[st].r, LED[st].g, LED[st].b);
-    fset_preset(p < 0 ? 0 : p + 1);
+    fcolor_step(1);
     fapply();
 }
 static void ftoggle(void) {
@@ -734,14 +770,17 @@ static void dispatch_change(int dir, int big) { if (fmode) fchange(dir, big); el
 static void dispatch_toggle(void) { if (fmode) ftoggle(); else toggle_on(); }
 static void dispatch_preset(void) { if (fmode) fnext_preset(); else next_preset(); }
 
-/* thoát mà chưa lưu: trả đèn về đúng trạng thái lúc mở app / lần lưu gần nhất */
+/* thoát mà chưa lưu: nếu app chưa ghi gì thì giữ nguyên; nếu đã ghi thì trả đèn về
+ * đúng trạng thái PHẦN CỨNG lúc mở app / lần lưu gần nhất (orig_mode: 1 = chế độ frame, 0 = chế độ vùng) */
 static void quit_all(void) {
+    if (hw_writes == 0) return;
     if (orig_mode == 0) {
-        if (frame_used) { wr("effect_enable", "1"); for (int i = 0; i < NZ; i++) apply_zone(i, &ORIG[i], 1); }
+        if (frame_used || fmode) { wr("effect_enable", "1"); for (int i = 0; i < NZ; i++) apply_zone(i, &ORIG[i], 1); }
         else quit_restore();
     } else {
         memcpy(LED, LED_ORIG, sizeof LED);
         for (int i = 0; i < NZ; i++) Z[i].bright = ORIG[i].bright;
+        frame_ready = 0;
         fapply();
     }
 }
@@ -814,7 +853,9 @@ int main(void) {
     if (fmode && !led_loaded) fmode = 0;
     memcpy(ORIG, Z, sizeof Z);
     memcpy(LED_ORIG, LED, sizeof LED);
-    orig_mode = fmode;
+    orig_mode = hardware_enable_off();     /* mốc = phần cứng thật lúc mở, không phải chế độ đã lưu */
+    hw_stale = orig_mode && !fmode;
+    hw_writes = 0;
 
     int msg_shown = 0, redraw = 1;
     SDL_Event e;
