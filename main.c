@@ -58,7 +58,7 @@ typedef struct { int r, g, b, on; } led_t;
 static led_t LED[NLED], LED_ORIG[NLED];
 static int fmode = 0, orig_mode = 0;          /* 0 = theo vùng, 1 = từng đèn */
 static int led_loaded = 0, frame_ready = 0, frame_used = 0;
-static int fgrp = 5, fidx = 0, fquick = 0;    /* nhóm (5 = tất cả), đèn trong nhóm (0 = cả nhóm), tạo nhanh */
+static int fgrp = 5, fidx = 0;                /* nhóm (5 = tất cả), đèn trong nhóm (0 = cả nhóm) */
 static unsigned hw_writes = 0;                /* số lần app đã ghi xuống đèn kể từ lúc mở / lần lưu gần nhất */
 static int hw_stale = 0;                      /* phần cứng đang ở chế độ frame nhưng giao diện mở ở chế độ vùng */
 static led_t SNAP[NLED];                      /* ảnh chụp màu từng đèn trước khi bị ghi đè ("Nhiều màu") */
@@ -587,6 +587,21 @@ static int fmixed(int mask) {
     }
     return 0;
 }
+/* dòng "Tạo nhanh" tự nhận biết từ màu hiện tại của các đèn đang chọn (không lưu lựa chọn):
+ * 1 = cầu vồng (đèn thứ k trong lựa chọn có màu mẫu k mod 8), 2 = cùng một màu, 0 = màu tự chọn */
+static int fquick_detect(void) {
+    int st, cnt;
+    fsel(&st, &cnt);
+    if (cnt < 2) return 0;
+    int rainbow = 1, same = 1;
+    for (int k = 0; k < cnt; k++) {
+        const led_t *l = &LED[st + k];
+        unsigned col = ((unsigned)l->r << 16) | ((unsigned)l->g << 8) | (unsigned)l->b;
+        if (!l->on || col != PRE[k % 8].rgb) rainbow = 0;
+        if (!l->on || l->r != LED[st].r || l->g != LED[st].g || l->b != LED[st].b) same = 0;
+    }
+    return rainbow ? 1 : same ? 2 : 0;
+}
 static int preset_of_rgb(int r, int g, int b) {
     unsigned c = ((unsigned)r << 16) | ((unsigned)g << 8) | (unsigned)b;
     for (int i = 0; i < NPRE; i++) if (PRE[i].rgb == c) return i;
@@ -650,7 +665,7 @@ static void fchange(int dir, int big) {
     int st, cnt;
     fsel(&st, &cnt);
     led_t *c = &LED[st];
-    if ((ri >= 3 && ri <= 5) || ri == 7) { if (fmixed(F_R | F_G | F_B)) fcapture(); }   /* sắp ghi đè một phần: chụp để còn khôi phục được */
+    if (ri >= 3 && ri <= 5) { if (fmixed(F_R | F_G | F_B)) fcapture(); }   /* sắp ghi đè một phần: chụp để còn khôi phục được */
     int step = big ? 32 : 8;
     switch (ri) {
     case 0: fgrp = (fgrp + dir + 6) % 6; fidx = 0; return;
@@ -661,13 +676,19 @@ static void fchange(int dir, int big) {
     case 5: { int v = clampi(c->b + dir * step, 0, 255); for (int k = 0; k < cnt; k++) { LED[st + k].b = v; LED[st + k].on = 1; } break; }
     case 6: fbright_set(clampi(fbright_cur() + dir * (big ? 20 : 5), 0, BR_MAX)); break;
     case 7: {
-        fquick = (fquick + dir + 3) % 3;
-        if (fquick == 1) {                       /* cầu vồng: mỗi đèn một màu theo thứ tự */
+        if (cnt < 2) return;                      /* một đèn thì không có gì để tạo nhanh */
+        int d = fquick_detect(), nq = (d + dir + 3) % 3;
+        int have = snap_valid && snap_st == st && snap_cnt == cnt;
+        if (nq == 0 && !have) nq = (nq + dir + 3) % 3;   /* chưa có màu cũ để khôi phục: bỏ qua "Không" */
+        if (d == 0) fcapture();                   /* rời trạng thái tự chọn: chụp màu hiện có để còn quay lại */
+        if (nq == 0) {                            /* "Không": khôi phục màu đã chụp */
+            for (int k = 0; k < cnt; k++) LED[st + k] = SNAP[st + k];
+        } else if (nq == 1) {                     /* cầu vồng: mỗi đèn một màu theo thứ tự */
             for (int k = 0; k < cnt; k++) {
                 unsigned col = PRE[k % 8].rgb;
                 LED[st + k].r = (int)((col >> 16) & 255); LED[st + k].g = (int)((col >> 8) & 255); LED[st + k].b = (int)(col & 255); LED[st + k].on = 1;
             }
-        } else if (fquick == 2) {                /* một màu: mọi đèn đang chọn cùng màu của đèn đầu tiên */
+        } else {                                  /* một màu: mọi đèn đang chọn cùng màu của đèn đầu tiên */
             led_t first = LED[st];
             for (int k = 0; k < cnt; k++) { LED[st + k] = first; LED[st + k].on = 1; }
         }
@@ -722,7 +743,8 @@ static void fdraw(void) {
         else if (i == 4) snprintf(v, sizeof v, m_g ? "—" : "%d", c->g);
         else if (i == 5) snprintf(v, sizeof v, m_b ? "—" : "%d", c->b);
         else if (i == 6) snprintf(v, sizeof v, m_br ? "—" : "%d%%", fbright_cur());
-        else snprintf(v, sizeof v, "< %s >", QNAME[fquick]);
+        else if (cnt < 2) snprintf(v, sizeof v, "—");
+        else snprintf(v, sizeof v, "< %s >", QNAME[fquick_detect()]);
         text(F_MED, v, 620, y + 12, i == ri ? acc : white, 2);
         int mm = i == 3 ? m_r : i == 4 ? m_g : i == 5 ? m_b : m_br;
         if (i >= 3 && i <= 6 && !mm) {
