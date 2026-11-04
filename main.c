@@ -224,24 +224,13 @@ static void load_nextui_file(void) {
     /* f2 dùng độ sáng của f1, giống NextUI (NextUI bỏ qua độ sáng của f2) */
     Z[Z_F2].bright = Z[Z_F1].bright;
 }
-/* Phần cứng đang ở chế độ frame? (đã lưu mode=1, hoặc effect_enable = 0).
+/* Phần cứng đang ở chế độ frame? (effect_enable = 0).
  * Khi đó màu các vùng trên phần cứng bị ghi đen và effect = 0 (xem frame_setup), nên KHÔNG đọc màu vùng từ đó. */
 static int hardware_enable_off(void) {      /* phần cứng đang ở chế độ frame (effect_enable = 0)? */
     char b[32];
     return rd_file("effect_enable", b, sizeof b) && atoi(b) == 0;
 }
-static int hardware_in_frame_mode(void) {
-    char p[256], line[512];
-    int frame = 0;
-    state_path(p, sizeof p);
-    FILE *f = fopen(p, "r");
-    if (f) {
-        while (fgets(line, sizeof line, f)) if (!strncmp(line, "mode=1", 6)) frame = 1;
-        fclose(f);
-    }
-    if (hardware_enable_off()) frame = 1;
-    return frame;
-}
+
 /* trạng thái thật đang có trên đèn (nếu đọc được) là nguồn đúng nhất */
 static void read_hardware(int read_zone_colors) {
     char b[64];
@@ -302,7 +291,7 @@ static void load_state_file(void) {
 }
 static void load_all(void) {
     load_nextui_file();
-    read_hardware(!hardware_in_frame_mode());
+    read_hardware(!hardware_enable_off());   /* đèn ở chế độ vùng (enable=1): màu vùng đọc từ đèn là màu thật */
     load_state_file();
     for (int i = 0; i < NZ; i++) {
         if (Z[i].bright < 0) Z[i].bright = 0;
@@ -807,6 +796,14 @@ static void quit_all(void) {
     }
 }
 
+/* chế độ giao diện lúc mở: chỉ vào "từng đèn" khi đèn thật đang ở chế độ frame (effect_enable = 0).
+ * Đèn đang ở chế độ vùng (NextUI vừa áp dụng lại cài đặt của nó) thì mở theo vùng để hiện đúng màu thật;
+ * màu từng đèn đã lưu vẫn còn trong bộ nhớ, bấm Y mới áp dụng lại. */
+static void choose_start_mode(void) {
+    if (fmode && !led_loaded) fmode = 0;
+    if (fmode && !hardware_enable_off()) fmode = 0;
+}
+
 /* ---------- vòng lặp ---------- */
 static int hx = 0;
 static Uint32 next_rep = 0;
@@ -872,7 +869,7 @@ int main(void) {
 
     /* nạp trạng thái; KHÔNG ghi gì xuống đèn lúc mở app */
     load_all();
-    if (fmode && !led_loaded) fmode = 0;
+    choose_start_mode();
     memcpy(ORIG, Z, sizeof Z);
     memcpy(LED_ORIG, LED, sizeof LED);
     orig_mode = hardware_enable_off();     /* mốc = phần cứng thật lúc mở, không phải chế độ đã lưu */
