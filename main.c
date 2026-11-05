@@ -20,6 +20,8 @@
 #define H 768
 #define NZ 6
 #define BR_MAX 60            /* help của driver: max_scale 0 ~ "tg5040 limit brightness 60" */
+/* giá trị thanh ghi (0..BR_MAX) -> phần trăm hiển thị (0..100%) để nhãn khớp với thanh trượt */
+static int br_pct(int v) { return (v * 100 + BR_MAX / 2) / BR_MAX; }
 #define NROW 8
 #define NSEL 7   /* 6 vùng + "Tất cả đèn" */
 #ifndef LED_DIR
@@ -423,7 +425,7 @@ static void draw(void) {
         else if (i == 3) snprintf(v, sizeof v, m_r ? "—" : "%d", z->r);
         else if (i == 4) snprintf(v, sizeof v, m_g ? "—" : "%d", z->g);
         else if (i == 5) snprintf(v, sizeof v, m_b ? "—" : "%d", z->b);
-        else if (i == 6) snprintf(v, sizeof v, m_br ? "—" : "%d%%", z->bright);
+        else if (i == 6) snprintf(v, sizeof v, m_br ? "—" : "%d%%", br_pct(z->bright));
         else { int k = 3; for (int j = 0; j < NEFF; j++) if (EFF[j] == z->effect) k = j; snprintf(v, sizeof v, "< %s >", m_ef ? "—" : EFFN[k]); }
         text(F_MED, v, 620, y + 12, i == ri ? acc : white, 2);
         int mm = i == 3 ? m_r : i == 4 ? m_g : i == 5 ? m_b : m_br;
@@ -731,7 +733,7 @@ static void fdraw(void) {
         else if (i == 3) snprintf(v, sizeof v, m_r ? "—" : "%d", c->r);
         else if (i == 4) snprintf(v, sizeof v, m_g ? "—" : "%d", c->g);
         else if (i == 5) snprintf(v, sizeof v, m_b ? "—" : "%d", c->b);
-        else if (i == 6) snprintf(v, sizeof v, m_br ? "—" : "%d%%", fbright_cur());
+        else if (i == 6) snprintf(v, sizeof v, m_br ? "—" : "%d%%", br_pct(fbright_cur()));
         else if (cnt < 2) snprintf(v, sizeof v, "—");
         else snprintf(v, sizeof v, "< %s >", QNAME[fquick_detect()]);
         text(F_MED, v, 620, y + 12, i == ri ? acc : white, 2);
